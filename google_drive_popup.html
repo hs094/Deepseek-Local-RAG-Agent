@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Google Drive Picker</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      text-align: center;
+    }
+    #picker-button {
+      background-color: #4285F4;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin: 20px 0;
+    }
+    #picker-button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    #status {
+      margin: 10px 0;
+      color: #666;
+    }
+    .selected-files {
+      margin-top: 20px;
+      text-align: left;
+      max-width: 600px;
+      margin: 20px auto;
+    }
+    .file-item {
+      background-color: #f1f3f4;
+      border-radius: 4px;
+      padding: 10px;
+      margin: 5px 0;
+      display: flex;
+      align-items: center;
+    }
+    .file-icon {
+      margin-right: 10px;
+    }
+    .file-name {
+      flex-grow: 1;
+    }
+    .file-type {
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 10px;
+      margin-left: 10px;
+    }
+    .file-type.pdf {
+      background-color: #e6f4ea;
+      color: #137333;
+    }
+    .file-type.other {
+      background-color: #fce8e6;
+      color: #c5221f;
+    }
+    .button-container {
+      margin-top: 20px;
+    }
+    #confirm-button {
+      background-color: #34A853;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin-right: 10px;
+    }
+    #cancel-button {
+      background-color: #EA4335;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    #confirm-button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <h1>Select Files from Google Drive</h1>
+  <p>Click the button below to open Google Drive and select PDF files.</p>
+
+  <button id="picker-button" onclick="createPicker()" disabled>Open Google Drive Picker</button>
+  <div id="status">Initializing...</div>
+
+  <div id="selected-files" class="selected-files"></div>
+
+  <div class="button-container">
+    <button id="confirm-button" onclick="confirmSelection()" disabled>Confirm Selection</button>
+    <button id="cancel-button" onclick="window.close()">Cancel</button>
+  </div>
+
+  <script>
+    // Global variables
+    let pickerApiLoaded = false;
+    let oauthToken = null;
+    let selectedFiles = [];
+
+    // Get the OAuth token from the URL parameters
+    function getOAuthToken() {
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get('token');
+    }
+
+    // Get the API key from the URL parameters
+    function getApiKey() {
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get('apiKey');
+    }
+
+    // Get the App ID from the URL parameters
+    function getAppId() {
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get('appId');
+    }
+
+    // Load the Google Picker API
+    function onApiLoad() {
+      gapi.load('picker', () => {
+        pickerApiLoaded = true;
+        document.getElementById('status').textContent = 'Google Picker API loaded';
+        updateButtonState();
+      });
+    }
+
+    // Update the button state based on API and token availability
+    function updateButtonState() {
+      const button = document.getElementById('picker-button');
+      const confirmButton = document.getElementById('confirm-button');
+
+      // Get the OAuth token
+      if (!oauthToken) {
+        oauthToken = getOAuthToken();
+      }
+
+      if (pickerApiLoaded && oauthToken) {
+        button.disabled = false;
+        document.getElementById('status').textContent = 'Ready to select files from Google Drive';
+      } else {
+        button.disabled = true;
+        if (!pickerApiLoaded) {
+          document.getElementById('status').textContent = 'Loading Google Picker API...';
+        } else if (!oauthToken) {
+          document.getElementById('status').textContent = 'OAuth token not available';
+        }
+      }
+
+      // Update confirm button state based on selected files
+      confirmButton.disabled = selectedFiles.length === 0;
+    }
+
+    // Create and render the Google Picker
+    function createPicker() {
+      if (!pickerApiLoaded || !oauthToken) {
+        document.getElementById('status').textContent = 'Google Picker API not loaded or OAuth token not available';
+        return;
+      }
+
+      const apiKey = getApiKey();
+      const appId = getAppId();
+
+      if (!apiKey || !appId) {
+        document.getElementById('status').textContent = 'API key or App ID not provided';
+        return;
+      }
+
+      document.getElementById('status').textContent = 'Opening Google Drive Picker...';
+
+      try {
+        const picker = new google.picker.PickerBuilder()
+          .addView(google.picker.ViewId.PDFS)  // Show only PDFs
+          .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
+          .setOAuthToken(oauthToken)
+          .setDeveloperKey(apiKey)
+          .setAppId(appId)
+          .setCallback(pickerCallback)
+          .build();
+
+        picker.setVisible(true);
+      } catch (error) {
+        document.getElementById('status').textContent = 'Error creating picker: ' + error.message;
+      }
+    }
+
+    // Handle the picker callback
+    function pickerCallback(data) {
+      if (data[google.picker.Response.ACTION] === google.picker.Action.PICKED) {
+        const docs = data[google.picker.Response.DOCUMENTS];
+        selectedFiles = docs.map(doc => ({
+          id: doc[google.picker.Document.ID],
+          name: doc[google.picker.Document.NAME],
+          url: doc[google.picker.Document.URL],
+          mimeType: doc[google.picker.Document.MIME_TYPE],
+          iconUrl: doc[google.picker.Document.ICON_URL]
+        }));
+
+        document.getElementById('status').textContent = `Selected ${selectedFiles.length} file(s)`;
+        displaySelectedFiles();
+        updateButtonState();
+      } else if (data[google.picker.Response.ACTION] === google.picker.Action.CANCEL) {
+        document.getElementById('status').textContent = 'File selection canceled';
+      }
+    }
+
+    // Display the selected files
+    function displaySelectedFiles() {
+      const container = document.getElementById('selected-files');
+      container.innerHTML = '';
+
+      if (selectedFiles.length === 0) {
+        container.innerHTML = '<p>No files selected</p>';
+        return;
+      }
+
+      for (const file of selectedFiles) {
+        const isPdf = file.mimeType === 'application/pdf';
+
+        const fileItem = document.createElement('div');
+        fileItem.className = 'file-item';
+
+        const fileIcon = document.createElement('span');
+        fileIcon.className = 'file-icon';
+        fileIcon.textContent = '📄';
+
+        const fileName = document.createElement('span');
+        fileName.className = 'file-name';
+        fileName.textContent = file.name;
+
+        const fileType = document.createElement('span');
+        fileType.className = `file-type ${isPdf ? 'pdf' : 'other'}`;
+        fileType.textContent = isPdf ? 'PDF' : 'Not PDF';
+
+        fileItem.appendChild(fileIcon);
+        fileItem.appendChild(fileName);
+        fileItem.appendChild(fileType);
+
+        container.appendChild(fileItem);
+      }
+    }
+
+    // Confirm the selection and send back to the parent window
+    function confirmSelection() {
+      if (selectedFiles.length === 0) {
+        document.getElementById('status').textContent = 'No files selected';
+        return;
+      }
+
+      try {
+        // Store the selected files in localStorage for retrieval
+        localStorage.setItem('selectedGDriveFiles', JSON.stringify(selectedFiles));
+
+        // Try multiple methods to communicate with the parent window
+        // Method 1: postMessage to opener
+        if (window.opener && typeof window.opener.postMessage === 'function') {
+          window.opener.postMessage({
+            type: 'google-drive-files',
+            files: selectedFiles
+          }, '*');
+          document.getElementById('status').textContent = 'Files sent to parent window via postMessage';
+        }
+        // Method 2: Use a redirect with query parameters
+        else {
+          document.getElementById('status').textContent = 'Using redirect method to send files';
+          // Create a form to post the data back to the parent
+          const form = document.createElement('form');
+          form.method = 'POST';
+          form.action = '/handle_files';
+          form.target = '_blank';
+
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = 'files';
+          input.value = JSON.stringify(selectedFiles);
+
+          form.appendChild(input);
+          document.body.appendChild(form);
+          form.submit();
+        }
+
+        // Show success message
+        document.getElementById('status').textContent = 'Files selected successfully! You can close this window.';
+        document.getElementById('status').style.color = 'green';
+        document.getElementById('status').style.fontWeight = 'bold';
+
+        // Add a message to instruct the user
+        const messageDiv = document.createElement('div');
+        messageDiv.innerHTML = '<p style="color: green; margin-top: 20px;">Please return to the Streamlit app and click "Process Selected Files" to continue.</p>';
+        document.body.appendChild(messageDiv);
+
+        // Add a button to close the window
+        const closeButton = document.createElement('button');
+        closeButton.textContent = 'Close Window';
+        closeButton.style.backgroundColor = '#4285F4';
+        closeButton.style.color = 'white';
+        closeButton.style.border = 'none';
+        closeButton.style.padding = '10px 20px';
+        closeButton.style.borderRadius = '4px';
+        closeButton.style.marginTop = '20px';
+        closeButton.style.cursor = 'pointer';
+        closeButton.onclick = () => window.close();
+        document.body.appendChild(closeButton);
+      } catch (error) {
+        document.getElementById('status').textContent = 'Error sending files: ' + error.message;
+        console.error('Error sending files:', error);
+      }
+    }
+
+    // Initialize
+    updateButtonState();
+  </script>
+
+  <script async defer src="https://apis.google.com/js/api.js" onload="onApiLoad()"></script>
+</body>
+</html>

@@ -13,8 +13,12 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements file
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Fix dependency conflicts and install Python dependencies
+RUN pip install --no-cache-dir pip==24.0 && \
+    # Fix the protobuf version conflict
+    sed -i 's/protobuf==6.30.2/protobuf==5.26.1/g' requirements.txt && \
+    # Install dependencies
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy project files
 COPY . .

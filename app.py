@@ -1,6 +1,10 @@
 import os
 import bs4
 import tempfile
+# Start the server in a separate process
+import subprocess
+import threading
+import time
 import sys
 from dotenv import load_dotenv
 from datetime import datetime
@@ -60,8 +64,19 @@ st.title("🐋 Deepseek RAG Reasoning Agent")
 def get_gdrive_client():
     """Get or create a Google Drive client."""
     try:
-        return GoogleDriveClient()
-    except NameError:
+        # Create the credentials directory if it doesn't exist
+        os.makedirs('credentials', exist_ok=True)
+
+        # Use custom paths for credentials and token files
+        credentials_path = os.path.join('credentials', 'credentials.json')
+        token_path = os.path.join('credentials', 'token.pickle')
+
+        return GoogleDriveClient(
+            credentials_file=credentials_path,
+            token_pickle_file=token_path
+        )
+    except Exception as e:
+        st.sidebar.error(f"Failed to initialize Google Drive client: {str(e)}")
         return None
 
 # Session State Initialization
@@ -301,49 +316,74 @@ st.sidebar.header("🤖 Agent Configuration")
 
 # Google Drive Login
 st.sidebar.header("🔐 Google Drive Access")
-gdrive_client = get_gdrive_client()
+
+# Try to get the Google Drive client
+try:
+    gdrive_client = get_gdrive_client()
+except Exception as e:
+    st.sidebar.error(f"Error initializing Google Drive client: {str(e)}")
+    gdrive_client = None
 
 # Only show Google Drive login if the client is available
 if gdrive_client:
-    # Allow user to upload credentials.json if it doesn't exist
-    if not gdrive_client.credentials_exist():
-        st.sidebar.info("Please upload your Google API credentials file (credentials.json)")
-        uploaded_file = st.sidebar.file_uploader("Upload credentials.json", type="json")
+    try:
+        # Allow user to upload credentials.json if it doesn't exist
+        if not gdrive_client.credentials_exist():
+            st.sidebar.info("Please upload your Google API credentials file (credentials.json)")
+            st.sidebar.caption("You can get this from the Google Cloud Console")
+            uploaded_file = st.sidebar.file_uploader("Upload credentials.json", type="json", key="credentials_uploader")
 
-        if uploaded_file is not None:
-            # Save the uploaded file
-            gdrive_client.save_credentials_file(uploaded_file.getbuffer())
-            st.sidebar.success("Credentials file uploaded successfully!")
-
-    # Login button in sidebar
-    if gdrive_client.credentials_exist() and not st.session_state.authenticated:
-        st.sidebar.subheader("Authentication")
-        st.sidebar.write("Click the button below to authenticate with Google Drive.")
-
-        if st.sidebar.button("Login to Google Drive", use_container_width=True):
-            with st.spinner("Authenticating..."):
-                authenticated = gdrive_client.authenticate()
-                if authenticated:
-                    st.session_state.authenticated = True
+            if uploaded_file is not None:
+                try:
+                    # Save the uploaded file
+                    gdrive_client.save_credentials_file(uploaded_file.getbuffer())
+                    st.sidebar.success("Credentials file uploaded successfully!")
+                    # Force a rerun to update the UI
                     st.rerun()
-                else:
-                    st.sidebar.error("Authentication failed. Please check your credentials.")
+                except Exception as e:
+                    st.sidebar.error(f"Error saving credentials: {str(e)}")
 
-    # Show authentication status
-    if st.session_state.authenticated:
-        st.sidebar.success("✅ Connected to Google Drive")
+        # Login button in sidebar
+        if gdrive_client.credentials_exist() and not st.session_state.authenticated:
+            st.sidebar.subheader("Authentication")
+            st.sidebar.write("Click the button below to authenticate with Google Drive.")
+
+            if st.sidebar.button("Login to Google Drive", use_container_width=True, key="gdrive_login"):
+                with st.spinner("Authenticating..."):
+                    try:
+                        authenticated = gdrive_client.authenticate()
+                        if authenticated:
+                            st.session_state.authenticated = True
+                            st.rerun()
+                        else:
+                            st.sidebar.error("Authentication failed. Please check your credentials.")
+                    except Exception as e:
+                        st.sidebar.error(f"Authentication error: {str(e)}")
+
+        # Show authentication status
+        if st.session_state.authenticated:
+            st.sidebar.success("✅ Connected to Google Drive")
+    except Exception as e:
+        st.sidebar.error(f"Error with Google Drive integration: {str(e)}")
 else:
-    st.sidebar.warning("Google Drive integration not available. MCP module not found.")
+    st.sidebar.warning("Google Drive integration not available. Make sure the MCP module is properly installed.")
 
 # Utility Functions
 def init_qdrant() -> QdrantClient | None:
     """Initialize Qdrant client with local settings only."""
     # Always use local mode
     try:
-        return QdrantClient(host="localhost", port=6333)
+        # Try to connect to Qdrant
+        client = QdrantClient(host="localhost", port=6333)
+
+        # Test the connection by making a simple API call
+        client.get_collections()
+
+        return client
     except Exception as e:
         st.error(f"🔴 Local Qdrant connection failed: {str(e)}")
         st.info("Make sure local Qdrant is running. You can start it with: bash run_qdrant.sh")
+        st.info("If you're running Qdrant in Docker, make sure the container is running with: docker ps")
         return None
 
 # File/URL Upload Section - Moved here to be just below Google Drive Login
@@ -358,32 +398,34 @@ if st.session_state.rag_enabled:
         web_url = st.text_input("Or enter URL")
 
     with gdrive_tab:
-        if st.session_state.authenticated:
+        if not gdrive_client:
+            st.warning("Google Drive integration is not available. Please check the error messages above.")
+        elif not st.session_state.authenticated:
+            st.info("Please authenticate with Google Drive using the login section above.")
+        else:
             # Get the OAuth token from the Google Drive client
             oauth_token = None
-            if gdrive_client:
-                try:
-                    # Use the method to get the access token
-                    oauth_token = gdrive_client.get_access_token()
-                    if oauth_token:
-                        pass
-                    else:
-                        st.warning("Failed to get OAuth token from credentials")
-                        # Try to re-authenticate
-                        st.info("Attempting to re-authenticate...")
-                        if gdrive_client.authenticate():
-                            oauth_token = gdrive_client.get_access_token()
-                            if oauth_token:
-                                st.success("OAuth token obtained after re-authentication")
+            try:
+                # Use the method to get the access token
+                oauth_token = gdrive_client.get_access_token()
+                if not oauth_token:
+                    st.warning("Failed to get OAuth token from credentials")
+                    # Try to re-authenticate
+                    with st.spinner("Attempting to re-authenticate..."):
+                        try:
+                            if gdrive_client.authenticate():
+                                oauth_token = gdrive_client.get_access_token()
+                                if oauth_token:
+                                    st.success("OAuth token obtained after re-authentication")
+                                else:
+                                    st.error("Still unable to get OAuth token after re-authentication")
                             else:
-                                st.error("Still unable to get OAuth token after re-authentication")
-                        else:
-                            st.error("Re-authentication failed")
-                except Exception as e:
-                    st.error(f"Error getting OAuth token: {str(e)}")
-                    st.write("Exception details:", str(e))
-            else:
-                st.warning("Google Drive client not available")
+                                st.error("Re-authentication failed")
+                        except Exception as e:
+                            st.error(f"Re-authentication error: {str(e)}")
+            except Exception as e:
+                st.error(f"Error getting OAuth token: {str(e)}")
+                st.info("Try logging out and logging back in to refresh your authentication.")
 
             # Create the Google Drive Picker popup
             if oauth_token:
@@ -391,18 +433,17 @@ if st.session_state.rag_enabled:
                 api_key = os.getenv('GOOGLE_API_KEY', '')
                 app_id = os.getenv('GOOGLE_APP_ID', '')
 
-                # Display instructions with more detailed guidance
-                st.info("Click the button below to open Google Drive Picker in a popup window. Only PDF files will be processed.")
+                if not api_key or not app_id:
+                    st.error("Missing Google API key or App ID. Please set GOOGLE_API_KEY and GOOGLE_APP_ID in your .env file.")
+                else:
+                    # Display instructions with more detailed guidance
+                    st.info("Click the button below to open Google Drive Picker in a popup window. Only PDF files will be processed.")
 
-                # Add a note about authentication status
-                st.success("✅ Authentication successful! You can now select files from Google Drive.")
+                    # Add a note about authentication status
+                    st.success("✅ Authentication successful! You can now select files from Google Drive.")
 
                 # Create a button to open the popup
                 if st.button("Open Google Drive Picker", key="open_gdrive_picker"):
-                    # Start the server in a separate process
-                    import subprocess
-                    import threading
-                    import time
 
                     # Kill any existing server processes (if psutil is available)
                     try:
@@ -414,6 +455,7 @@ if st.session_state.rag_enabled:
                             has_psutil = False
                             print("psutil not installed, skipping process cleanup")
                             print("To install psutil, run: pip install psutil")
+                            st.info("For better process management, install psutil: `pip install psutil`")
 
                         if has_psutil:
                             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
@@ -422,6 +464,7 @@ if st.session_state.rag_enabled:
                                     psutil.Process(proc.info['pid']).terminate()
                     except Exception as e:
                         print(f"Error cleaning up processes: {e}")
+                        st.warning(f"Error cleaning up processes: {e}")
 
                     # Start the server process
                     server_process = subprocess.Popen(
@@ -565,10 +608,10 @@ if st.session_state.rag_enabled:
                     4. If the popup doesn't open, try running the server manually: `python serve_picker.py --serve-only`
                     5. If you still have issues, check the browser console for error messages (F12 or right-click > Inspect > Console)
                     """)
+                # else:
+                    # st.warning("OAuth token not available. Please re-authenticate with Google Drive.")
             else:
-                st.warning("OAuth token not available. Please re-authenticate with Google Drive.")
-        else:
-            st.info("Please login to Google Drive to select files.")
+                st.info("Please login to Google Drive to select files.")
 
 # RAG Mode Toggle
 st.sidebar.header("🔍 RAG Configuration")

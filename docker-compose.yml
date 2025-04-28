@@ -17,11 +17,19 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - GOOGLE_APP_ID=${GOOGLE_APP_ID}
       - QDRANT_DB_URL=http://qdrant:6333
+      - GDRIVE_PICKER_URL=http://gdrive-picker:3001
     depends_on:
       - qdrant
       - gdrive-picker
     networks:
       - deepseek-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # Google Drive Picker service
   gdrive-picker:
@@ -35,6 +43,13 @@ services:
       - ./google_drive_popup.html:/app/google_drive_popup.html
     networks:
       - deepseek-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # Qdrant vector database
   qdrant:
@@ -46,6 +61,13 @@ services:
       - qdrant_storage:/qdrant/storage
     networks:
       - deepseek-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/readiness"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
 networks:
   deepseek-network:

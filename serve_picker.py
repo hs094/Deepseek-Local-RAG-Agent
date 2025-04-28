@@ -98,15 +98,21 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
             # Handle other POST requests
             super().do_POST()
 
-def run_server(port=PORT):
-    """Run the HTTP server on the specified port."""
+def run_server(port=PORT, host=""):
+    """Run the HTTP server on the specified port and host.
+
+    Args:
+        port: Port number to listen on
+        host: Host address to bind to. Empty string means all interfaces.
+    """
     handler = CustomHandler
 
     # Try to find an available port
     for attempt in range(10):
         try:
-            with socketserver.TCPServer(("", port), handler) as httpd:
-                print(f"Serving at http://localhost:{port}")
+            with socketserver.TCPServer((host, port), handler) as httpd:
+                hostname = "0.0.0.0" if host == "" else host
+                print(f"Serving at http://{hostname}:{port}")
                 print(f"Press Ctrl+C to stop the server")
                 httpd.serve_forever()
                 break
@@ -140,6 +146,7 @@ if __name__ == "__main__":
     parser.add_argument("--api-key", help="Google API key")
     parser.add_argument("--app-id", help="Google App ID")
     parser.add_argument("--port", type=int, default=PORT, help=f"Port to serve on (default: {PORT})")
+    parser.add_argument("--host", default="", help="Host address to bind to (default: all interfaces)")
     parser.add_argument("--serve-only", action="store_true", help="Only serve the HTML file without opening the browser")
 
     args = parser.parse_args()
@@ -154,4 +161,4 @@ if __name__ == "__main__":
         open_picker(args.token, args.api_key, args.app_id, args.port)
 
     # Run the server
-    run_server(args.port)
+    run_server(port=args.port, host=args.host)

@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 .venv
 .env
+uv.lock
 credentials.json
 token.pickle
 google_drive_picker/frontend/node_modules

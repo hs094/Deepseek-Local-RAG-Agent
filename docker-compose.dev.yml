@@ -7,6 +7,7 @@ services:
       - .:/app  # Mount the entire project directory
     environment:
       - PYTHONUNBUFFERED=1  # Ensure Python output is not buffered
+      - DEBUG=1  # Enable debug mode
     command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.runOnSave=true"]
 
   # Google Drive Picker service with development settings
@@ -15,4 +16,13 @@ services:
       - ./google_drive_picker:/app/google_drive_picker  # Mount the picker directory
       - ./serve_picker.py:/app/serve_picker.py  # Mount the server file
       - ./google_drive_popup.html:/app/google_drive_popup.html  # Mount the popup HTML
-    command: ["python3", "serve_picker.py", "--serve-only", "--port", "3001"]
+    command: ["python3", "serve_picker.py", "--serve-only", "--port", "3001", "--host", "0.0.0.0"]
+
+  # Qdrant with development settings
+  qdrant:
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+      - ./qdrant_data:/tmp/qdrant_data  # For easier data inspection

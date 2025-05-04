@@ -14,9 +14,8 @@ from agno.agent import Agent
 from agno.models.groq import Groq
 from langchain_community.document_loaders import PyPDFLoader, WebBaseLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
+from langchain_pinecone import PineconeVectorStore
+from pinecone import Pinecone, ServerlessSpec
 from langchain_core.embeddings import Embeddings
 from agno.tools.exa import ExaTools
 from agno.embedder.ollama import OllamaEmbedder
@@ -82,10 +81,18 @@ def get_gdrive_client():
 # Session State Initialization
 if 'google_api_key' not in st.session_state:
     st.session_state.google_api_key = os.getenv("GEMINI_API_KEY")
-if 'qdrant_api_key' not in st.session_state:
-    st.session_state.qdrant_api_key = os.getenv('QDRANT_API_KEY')
-if 'qdrant_url' not in st.session_state:
-    st.session_state.qdrant_url = os.getenv('QDRANT_DB_URL')
+if 'pinecone_api_key' not in st.session_state:
+    st.session_state.pinecone_api_key = os.getenv('PINECONE_API_KEY')
+if 'pinecone_index_name' not in st.session_state:
+    st.session_state.pinecone_index_name = os.getenv('PINECONE_INDEX_NAME', 'deepseek-rag')
+if 'pinecone_cloud' not in st.session_state:
+    st.session_state.pinecone_cloud = os.getenv('PINECONE_CLOUD', 'aws')
+if 'pinecone_region' not in st.session_state:
+    st.session_state.pinecone_region = os.getenv('PINECONE_REGION', 'us-west-2')
+if 'pinecone_manager' not in st.session_state:
+    st.session_state.pinecone_manager = None
+if 'use_model_based_index' not in st.session_state:
+    st.session_state.use_model_based_index = False
 if 'model_version' not in st.session_state:
     st.session_state.model_version = "deepseek-r1:1.5b"  # Default to lighter model
 if 'vector_store' not in st.session_state:
@@ -108,8 +115,6 @@ if 'user_agent' not in st.session_state:
     st.session_state.user_agent = os.getenv('USER_AGENT', 'DeepseekLocalRAGAgent/0.1.0')
 if 'exa_api_key' not in st.session_state:
     st.session_state.exa_api_key = os.getenv('EXA_API_KEY')
-if 'use_local_qdrant' not in st.session_state:
-    st.session_state.use_local_qdrant = True  # Always use local QDrant
 if 'use_groq' not in st.session_state:
     st.session_state.use_groq = True  # Always use Groq API
 if 'groq_api_key' not in st.session_state:
@@ -189,30 +194,25 @@ def process_web(url: str) -> List:
         return []
 
 # Vector Store Management
-def create_vector_store(client, texts):
+def create_vector_store(texts):
     """Create and initialize vector store with documents."""
     try:
-        # Create collection if needed
-        try:
-            client.create_collection(
-                collection_name=COLLECTION_NAME,
-                vectors_config=VectorParams(
-                    size=1024,
-                    distance=Distance.COSINE
-                )
-            )
-            st.success(f"📚 Created new collection: {COLLECTION_NAME}")
-        except Exception as e:
-            if "already exists" not in str(e).lower():
-                raise e
-        # Initialize vector store
-        vector_store = QdrantVectorStore(
-            client=client,
-            collection_name=COLLECTION_NAME,
+        # Make sure we have a Pinecone client
+        if not st.session_state.pinecone_client:
+            st.error("🔴 Pinecone client not initialized. Please initialize Pinecone first.")
+            return None
+
+        # Get the index from the Pinecone client
+        index = st.session_state.pinecone_client.Index(st.session_state.pinecone_index_name)
+
+        # Initialize vector store with the Pinecone index
+        vector_store = PineconeVectorStore(
+            index=index,
             embedding=OllamaEmbedderr()
         )
+
         # Add documents
-        with st.spinner('📤 Uploading documents to Qdrant...'):
+        with st.spinner('📤 Uploading documents to Pinecone...'):
             vector_store.add_documents(texts)
             st.success("✅ Documents stored successfully!")
             return vector_store
@@ -369,26 +369,47 @@ else:
     st.sidebar.warning("Google Drive integration not available. Make sure the MCP module is properly installed.")
 
 # Utility Functions
-def init_qdrant() -> QdrantClient | None:
-    """Initialize Qdrant client with local settings only."""
-    # Always use local mode
+def init_pinecone():
+    """Initialize Pinecone client."""
     try:
-        # Try to connect to Qdrant
-        client = QdrantClient(host="localhost", port=6333)
+        # Check if we have the required credentials
+        if not st.session_state.pinecone_api_key:
+            st.error("🔴 Pinecone API key is missing. Please add it to your .env file.")
+            return None
 
-        # Test the connection by making a simple API call
-        client.get_collections()
+        # Initialize Pinecone with the new API
+        pc = Pinecone(
+            api_key=st.session_state.pinecone_api_key
+        )
 
-        return client
+        # Store the Pinecone client in session state for later use
+        st.session_state.pinecone_client = pc
+
+        # Check if the index exists, create it if it doesn't
+        index_name = st.session_state.pinecone_index_name
+        if index_name not in [idx.name for idx in pc.list_indexes()]:
+            st.info(f"📚 Creating new Pinecone index: {index_name}")
+
+            # Create the index with ServerlessSpec
+            pc.create_index(
+                name=index_name,
+                dimension=1024,
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud=st.session_state.pinecone_cloud,
+                    region=st.session_state.pinecone_region
+                )
+            )
+            st.success(f"✅ Created Pinecone index: {index_name}")
+
+        return True
     except Exception as e:
-        st.error(f"🔴 Local Qdrant connection failed: {str(e)}")
-        st.info("Make sure local Qdrant is running. You can start it with: bash run_qdrant.sh")
-        st.info("If you're running Qdrant in Docker, make sure the container is running with: docker ps")
+        st.error(f"🔴 Pinecone initialization failed: {str(e)}")
         return None
 
 # File/URL Upload Section - Moved here to be just below Google Drive Login
 if st.session_state.rag_enabled:
-    qdrant_client = init_qdrant()
+    pinecone_initialized = init_pinecone()
 
     st.sidebar.header("📁 Data Upload")
     upload_tab, gdrive_tab = st.sidebar.tabs(["Local Upload", "Google Drive"])
@@ -574,11 +595,11 @@ if st.session_state.rag_enabled:
                                             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                                                 tmp_file.write(file_content.getvalue())
                                                 texts = process_pdf(tmp_file, file_name=file['name'])
-                                                if texts and qdrant_client:
+                                                if texts and pinecone_initialized:
                                                     if st.session_state.vector_store:
                                                         st.session_state.vector_store.add_documents(texts)
                                                     else:
-                                                        st.session_state.vector_store = create_vector_store(qdrant_client, texts)
+                                                        st.session_state.vector_store = create_vector_store(texts)
                                                     st.session_state.processed_documents.append(file['name'])
                                                     st.success(f"✅ Added PDF: {file['name']}")
                                     except Exception as e:
@@ -666,16 +687,15 @@ if st.session_state.use_web_search:
 
 # Search Configuration moved inside RAG mode check
 
-# st.sidebar.header("🗄️ Qdrant Configuration")
-# st.sidebar.info("Using Local Qdrant (localhost:6333)")
-# Force use_local_qdrant to always be True
-st.session_state.use_local_qdrant = True
+# st.sidebar.header("🗄️ Vector Database Configuration")
+# st.sidebar.info("Using Pinecone")
+# No need to force any settings here as we're using Pinecone
 
 
 # Check if RAG is enabled
 if st.session_state.rag_enabled:
-    # Initialize qdrant_client for document processing
-    qdrant_client = init_qdrant()
+    # Initialize Pinecone for document processing
+    pinecone_initialized = init_pinecone()
 
     # Process documents
     if uploaded_file:
@@ -683,11 +703,11 @@ if st.session_state.rag_enabled:
         if file_name not in st.session_state.processed_documents:
             with st.spinner('Processing PDF...'):
                 texts = process_pdf(uploaded_file)
-                if texts and qdrant_client:
+                if texts and pinecone_initialized:
                     if st.session_state.vector_store:
                         st.session_state.vector_store.add_documents(texts)
                     else:
-                        st.session_state.vector_store = create_vector_store(qdrant_client, texts)
+                        st.session_state.vector_store = create_vector_store(texts)
                     st.session_state.processed_documents.append(file_name)
                     st.success(f"✅ Added PDF: {file_name}")
 
@@ -695,11 +715,11 @@ if st.session_state.rag_enabled:
         if web_url not in st.session_state.processed_documents:
             with st.spinner('Processing URL...'):
                 texts = process_web(web_url)
-                if texts and qdrant_client:
+                if texts and pinecone_initialized:
                     if st.session_state.vector_store:
                         st.session_state.vector_store.add_documents(texts)
                     else:
-                        st.session_state.vector_store = create_vector_store(qdrant_client, texts)
+                        st.session_state.vector_store = create_vector_store(texts)
                     st.session_state.processed_documents.append(web_url)
                     st.success(f"✅ Added URL: {web_url}")
 

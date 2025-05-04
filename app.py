@@ -21,14 +21,17 @@ from agno.tools.exa import ExaTools
 from agno.embedder.ollama import OllamaEmbedder
 
 # Add the MCP module to the path
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mcp'))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'drive_mcp'))
 
 # Import the MCP module
 try:
-    from mcp.gdrive import GoogleDriveClient
-except ImportError:
+    from drive_mcp.gdrive import GoogleDriveClient
+    from drive_mcp.pinecone_indexer import PineconeIndexer
+except ImportError as e:
     # If the module is not found, we'll handle this gracefully
+    print(f"Import error: {e}")
     GoogleDriveClient = None
+    PineconeIndexer = None
 
 load_dotenv()
 
@@ -85,10 +88,6 @@ if 'pinecone_api_key' not in st.session_state:
     st.session_state.pinecone_api_key = os.getenv('PINECONE_API_KEY')
 if 'pinecone_index_name' not in st.session_state:
     st.session_state.pinecone_index_name = os.getenv('PINECONE_INDEX_NAME', 'deepseek-rag')
-if 'pinecone_cloud' not in st.session_state:
-    st.session_state.pinecone_cloud = os.getenv('PINECONE_CLOUD', 'aws')
-if 'pinecone_region' not in st.session_state:
-    st.session_state.pinecone_region = os.getenv('PINECONE_REGION', 'us-west-2')
 if 'pinecone_manager' not in st.session_state:
     st.session_state.pinecone_manager = None
 if 'use_model_based_index' not in st.session_state:
@@ -396,8 +395,8 @@ def init_pinecone():
                 dimension=1024,
                 metric="cosine",
                 spec=ServerlessSpec(
-                    cloud=st.session_state.pinecone_cloud,
-                    region=st.session_state.pinecone_region
+                    cloud="aws",
+                    region="us-east-1"
                 )
             )
             st.success(f"✅ Created Pinecone index: {index_name}")
@@ -453,7 +452,6 @@ if st.session_state.rag_enabled:
                 # These should be set to your actual values from Google Cloud Console
                 api_key = os.getenv('GOOGLE_API_KEY', '')
                 app_id = os.getenv('GOOGLE_APP_ID', '')
-
                 if not api_key or not app_id:
                     st.error("Missing Google API key or App ID. Please set GOOGLE_API_KEY and GOOGLE_APP_ID in your .env file.")
                 else:
@@ -553,8 +551,38 @@ if st.session_state.rag_enabled:
                     """
                     st.components.v1.html(js_code, height=0)
 
-                # Add a button to process selected files
-                if st.button("Process Selected Files", key="process_gdrive_files"):
+                    # Display a notification that files have been selected
+                    import glob
+                    import json
+
+                    # Find the most recent JSON file in the temp directory
+                    temp_dir = tempfile.gettempdir()
+                    json_files = glob.glob(os.path.join(temp_dir, '*.json'))
+
+                    if json_files:
+                        # Sort by modification time (newest first)
+                        json_files.sort(key=os.path.getmtime, reverse=True)
+
+                        # Try to load each file until we find one with valid Google Drive files
+                        selected_files = None
+                        for json_file in json_files:
+                            try:
+                                with open(json_file, 'r') as f:
+                                    data = json.load(f)
+                                    # Check if this looks like Google Drive files
+                                    if isinstance(data, list) and len(data) > 0 and 'id' in data[0] and 'mimeType' in data[0]:
+                                        # Check if this file was processed recently (within the last 5 seconds)
+                                        file_mod_time = os.path.getmtime(json_file)
+                                        if time.time() - file_mod_time < 5:  # 5 seconds threshold
+                                            selected_files = data
+                                            st.success(f"Found {len(selected_files)} file(s) selected from Google Drive")
+                                            st.info("Click the 'Index Selected Files in Pinecone' button below to process and index these files.")
+                                            break
+                            except Exception as e:
+                                print(f"Error loading {json_file}: {str(e)}")
+
+                # Add a button to manually initiate indexing
+                if st.button("Index Selected Files in Pinecone", key="manual_index_button"):
                     # Look for selected files in temporary files
                     import glob
                     import json
@@ -581,33 +609,165 @@ if st.session_state.rag_enabled:
                             except Exception as e:
                                 print(f"Error loading {json_file}: {str(e)}")
 
-                        if selected_files:
-                            # Process each PDF file
-                            for file in selected_files:
-                                if file.get('mimeType') == 'application/pdf':
-                                    try:
-                                        with st.spinner(f"Processing {file['name']}..."):
-                                            # Get the file content using the Google Drive client
-                                            file_id = file['id']
-                                            file_content = gdrive_client.get_file_content(file_id)
+                        if selected_files and pinecone_initialized:
+                            with st.spinner("Indexing selected files in Pinecone..."):
+                                try:
+                                    # Check if PineconeIndexer is available
+                                    if PineconeIndexer is None:
+                                        st.error("PineconeIndexer module is not available. Please check your installation.")
+                                        st.info("Falling back to manual processing...")
 
-                                            # Process the file content as a PDF
-                                            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                                                tmp_file.write(file_content.getvalue())
-                                                texts = process_pdf(tmp_file, file_name=file['name'])
-                                                if texts and pinecone_initialized:
-                                                    if st.session_state.vector_store:
-                                                        st.session_state.vector_store.add_documents(texts)
-                                                    else:
-                                                        st.session_state.vector_store = create_vector_store(texts)
-                                                    st.session_state.processed_documents.append(file['name'])
-                                                    st.success(f"✅ Added PDF: {file['name']}")
-                                    except Exception as e:
-                                        st.error(f"Error processing file from Google Drive: {str(e)}")
-                                else:
-                                    st.warning(f"Skipped non-PDF file: {file['name']}")
+                                        # Process each file (PDF or text) manually
+                                        processed_count = 0
+                                        for file in selected_files:
+                                            mime_type = file.get('mimeType', '')
+                                            print(mime_type)
+                                            is_pdf = mime_type == 'application/pdf'
+                                            is_text = mime_type == 'text/plain' or 'text' in mime_type
+                                            is_doc = 'document' in mime_type or 'officedocument' in mime_type
+
+                                            if is_pdf or is_text or is_doc:
+                                                try:
+                                                    with st.spinner(f"Processing {file['name']}..."):
+                                                        # Get the file content using the Google Drive client
+                                                        file_id = file['id']
+                                                        file_content = gdrive_client.get_file_content(file_id)
+
+                                                        # Determine file type and process accordingly
+                                                        if is_pdf:
+                                                            # Process as PDF
+                                                            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                                                                tmp_file.write(file_content.getvalue())
+                                                                texts = process_pdf(tmp_file, file_name=file['name'])
+                                                        elif is_text:
+                                                            # Process as text file
+                                                            with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as tmp_file:
+                                                                tmp_file.write(file_content.getvalue())
+                                                                # Use the existing process_web function to handle text
+                                                                # This is a workaround since we don't have a dedicated text processor
+                                                                texts = []
+                                                                try:
+                                                                    from langchain_community.document_loaders import TextLoader
+                                                                    loader = TextLoader(tmp_file.name)
+                                                                    documents = loader.load()
+                                                                    # Add metadata
+                                                                    for doc in documents:
+                                                                        doc.metadata.update({
+                                                                            "source_type": "text",
+                                                                            "file_name": file['name'],
+                                                                            "timestamp": datetime.now().isoformat()
+                                                                        })
+                                                                    # Split text
+                                                                    text_splitter = RecursiveCharacterTextSplitter(
+                                                                        chunk_size=1000,
+                                                                        chunk_overlap=200
+                                                                    )
+                                                                    texts = text_splitter.split_documents(documents)
+                                                                except Exception as text_error:
+                                                                    st.error(f"Error processing text file: {str(text_error)}")
+                                                        elif is_doc:
+                                                            # Try to process as text for document files
+                                                            st.info(f"Attempting to process document file: {file['name']} as text")
+                                                            with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as tmp_file:
+                                                                tmp_file.write(file_content.getvalue())
+                                                                # Try to extract text from the document
+                                                                try:
+                                                                    from langchain_community.document_loaders import TextLoader
+                                                                    loader = TextLoader(tmp_file.name)
+                                                                    documents = loader.load()
+                                                                    # Add metadata
+                                                                    for doc in documents:
+                                                                        doc.metadata.update({
+                                                                            "source_type": "document",
+                                                                            "file_name": file['name'],
+                                                                            "timestamp": datetime.now().isoformat()
+                                                                        })
+                                                                    # Split text
+                                                                    text_splitter = RecursiveCharacterTextSplitter(
+                                                                        chunk_size=1000,
+                                                                        chunk_overlap=200
+                                                                    )
+                                                                    texts = text_splitter.split_documents(documents)
+                                                                except Exception as doc_error:
+                                                                    st.warning(f"Could not process document as text: {str(doc_error)}")
+                                                                    texts = []
+
+                                                        # Add to vector store if we have texts
+                                                        if texts and pinecone_initialized:
+                                                            if st.session_state.vector_store:
+                                                                st.session_state.vector_store.add_documents(texts)
+                                                            else:
+                                                                st.session_state.vector_store = create_vector_store(texts)
+                                                            st.session_state.processed_documents.append(file['name'])
+                                                            st.success(f"✅ Added file: {file['name']}")
+                                                            processed_count += 1
+                                                except Exception as e:
+                                                    st.error(f"Error processing file from Google Drive: {str(e)}")
+                                                    import traceback
+                                                    st.error(f"Traceback: {traceback.format_exc()}")
+                                            else:
+                                                st.warning(f"Skipped unsupported file type: {mime_type} - {file['name']}")
+
+                                        # Add a visual indicator after all files are processed
+                                        if processed_count > 0:
+                                            st.markdown("""
+                                            <div style="background-color: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin-top: 10px; text-align: center;">
+                                                <h3 style="margin: 0;">✅ Pinecone Index Updated</h3>
+                                                <p style="margin: 10px 0 0 0;">Your files have been successfully indexed and are ready for RAG chat.</p>
+                                            </div>
+                                            """, unsafe_allow_html=True)
+                                    else:
+                                        # Initialize the Pinecone indexer with local embeddings
+                                        indexer = PineconeIndexer(
+                                            pinecone_client=st.session_state.pinecone_client,
+                                            index_name=st.session_state.pinecone_index_name,
+                                            namespace="rag-namespace",
+                                            chunk_size=500,
+                                            chunk_overlap=50,
+                                            embedding_model="snowflake-arctic-embed"  # Use local embedding model
+                                        )
+
+                                        # Index the files
+                                        results = indexer.index_files(selected_files, gdrive_client)
+
+                                        # Update the processed documents list
+                                        for file_name in results["processed_files_list"]:
+                                            if file_name not in st.session_state.processed_documents:
+                                                st.session_state.processed_documents.append(file_name)
+
+                                        # Show results
+                                        st.success(f"✅ Indexed {results['processed_files']} files with {results['total_chunks']} chunks in Pinecone")
+                                        if results["skipped_files"] > 0:
+                                            st.info(f"ℹ️ Skipped {results['skipped_files']} unsupported files")
+
+                                        # Initialize vector store if needed
+                                        if not st.session_state.vector_store:
+                                            index = st.session_state.pinecone_client.Index(st.session_state.pinecone_index_name)
+                                            st.session_state.vector_store = PineconeVectorStore(
+                                                index=index,
+                                                embedding=OllamaEmbedderr()
+                                            )
+
+                                        # Notification that files are ready for search
+                                        st.success("🔍 Files are now indexed and ready for search!")
+
+                                        # Add a visual indicator
+                                        st.markdown("""
+                                        <div style="background-color: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin-top: 10px; text-align: center;">
+                                            <h3 style="margin: 0;">✅ Pinecone Index Updated</h3>
+                                            <p style="margin: 10px 0 0 0;">Your files have been successfully indexed and are ready for RAG chat.</p>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+
+                                except Exception as e:
+                                    st.error(f"Error indexing files: {str(e)}")
+                                    import traceback
+                                    st.error(f"Traceback: {traceback.format_exc()}")
                         else:
-                            st.warning("No recently selected files found. Please select files from Google Drive first.")
+                            if not selected_files:
+                                st.warning("No selected files found. Please select files from Google Drive first.")
+                            elif not pinecone_initialized:
+                                st.error("Pinecone is not initialized. Please initialize Pinecone first.")
                     else:
                         st.warning("No selected files found. Please select files from Google Drive first.")
 
@@ -615,9 +775,10 @@ if st.session_state.rag_enabled:
                 st.info("""
                 **Instructions:**
                 1. Click the "Open Google Drive Picker" button to select files from Google Drive
-                2. Select PDF files in the popup window
+                2. Select PDF or text files in the popup window
                 3. Click "Confirm Selection" in the popup
-                4. Return to this page and click "Process Selected Files" to add the PDFs to your RAG system
+                4. Click the "Index Selected Files in Pinecone" button to process and index your files
+                5. Once indexed, the files will be ready for RAG chat
                 """)
 
                 # Add instructions for troubleshooting
@@ -637,6 +798,38 @@ if st.session_state.rag_enabled:
 # RAG Mode Toggle
 st.sidebar.header("🔍 RAG Configuration")
 st.session_state.rag_enabled = st.sidebar.toggle("Enable RAG Mode", value=st.session_state.rag_enabled)
+
+# Add a button to initiate chunking and pushing to Pinecone
+if st.session_state.rag_enabled:
+    st.sidebar.header("🔄 Index Management")
+
+    # Initialize a session state variable to track indexing status if it doesn't exist
+    if 'indexing_status' not in st.session_state:
+        st.session_state.indexing_status = None
+
+    # Display the current indexing status if available
+    if st.session_state.indexing_status:
+        if st.session_state.indexing_status == "success":
+            st.sidebar.success("✅ Documents successfully indexed in Pinecone!")
+        elif st.session_state.indexing_status == "error":
+            st.sidebar.error("❌ Error occurred during indexing. Please try again.")
+        elif st.session_state.indexing_status == "in_progress":
+            st.sidebar.info("⏳ Indexing in progress...")
+
+    # Button to initiate chunking and pushing to Pinecone
+    if st.sidebar.button("🚀 Process & Index Documents", help="Chunk documents and push to Pinecone index"):
+        if not st.session_state.processed_documents:
+            st.sidebar.warning("⚠️ No documents to index. Please upload or select documents first.")
+        elif not pinecone_initialized:
+            st.sidebar.error("❌ Pinecone not initialized. Please check your API key.")
+        else:
+            try:
+                st.session_state.indexing_status = "in_progress"
+                st.sidebar.info("⏳ Processing and indexing documents...")
+                st.rerun()  # Rerun to show the in-progress status
+            except Exception as e:
+                st.session_state.indexing_status = "error"
+                st.sidebar.error(f"❌ Error: {str(e)}")
 
 # Clear Chat Button
 if st.sidebar.button("🗑️ Clear Chat History"):
@@ -763,21 +956,49 @@ if prompt:
             # Step 2: Choose search strategy based on force_web_search toggle
             context = ""
             docs = []
-            if not st.session_state.force_web_search and st.session_state.vector_store:
-                # Try document search first
-                retriever = st.session_state.vector_store.as_retriever(
-                    search_type="similarity_score_threshold",
-                    search_kwargs={
-                        "k": 5,
-                        "score_threshold": st.session_state.similarity_threshold
-                    }
-                )
-                docs = retriever.invoke(rewritten_query)
-                if docs:
-                    context = "\n\n".join([d.page_content for d in docs])
-                    st.info(f"📊 Found {len(docs)} relevant documents (similarity > {st.session_state.similarity_threshold})")
-                elif st.session_state.use_web_search:
-                    st.info("🔄 No relevant documents found in database, falling back to web search...")
+            if not st.session_state.force_web_search:
+                # Try document search first using MCP's PineconeIndexer
+                try:
+                    # Initialize the Pinecone indexer for retrieval
+                    if 'pinecone_indexer' not in st.session_state or st.session_state.pinecone_indexer is None:
+                        st.session_state.pinecone_indexer = PineconeIndexer(
+                            pinecone_client=st.session_state.pinecone_client,
+                            index_name=st.session_state.pinecone_index_name,
+                            namespace="rag-namespace",
+                            embedding_model="snowflake-arctic-embed"
+                        )
+
+                    # Use the indexer to retrieve documents
+                    with st.spinner("🔍 Searching documents..."):
+                        docs = st.session_state.pinecone_indexer.retrieve_as_langchain_docs(
+                            query=rewritten_query,
+                            top_k=5,
+                            score_threshold=st.session_state.similarity_threshold
+                        )
+
+                        if docs:
+                            context = "\n\n".join([d.page_content for d in docs])
+                            st.info(f"📊 Found {len(docs)} relevant documents (similarity > {st.session_state.similarity_threshold})")
+                        elif st.session_state.use_web_search:
+                            st.info("🔄 No relevant documents found in database, falling back to web search...")
+                except Exception as e:
+                    st.error(f"❌ Error retrieving documents: {str(e)}")
+                    # Fallback to traditional vector store if available
+                    if st.session_state.vector_store:
+                        st.info("Falling back to traditional vector store...")
+                        retriever = st.session_state.vector_store.as_retriever(
+                            search_type="similarity_score_threshold",
+                            search_kwargs={
+                                "k": 5,
+                                "score_threshold": st.session_state.similarity_threshold
+                            }
+                        )
+                        docs = retriever.invoke(rewritten_query)
+                        if docs:
+                            context = "\n\n".join([d.page_content for d in docs])
+                            st.info(f"📊 Found {len(docs)} relevant documents (similarity > {st.session_state.similarity_threshold})")
+                        elif st.session_state.use_web_search:
+                            st.info("🔄 No relevant documents found in database, falling back to web search...")
 
             # Step 3: Use web search if:
             # 1. Web search is forced ON via toggle, or

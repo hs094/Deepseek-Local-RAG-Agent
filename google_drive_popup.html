@@ -90,7 +90,7 @@
 </head>
 <body>
   <h1>Select Files from Google Drive</h1>
-  <p>Click the button below to open Google Drive and select PDF files.</p>
+  <p>Click the button below to open Google Drive and select PDF or text files.</p>
 
   <button id="picker-button" onclick="createPicker()" disabled>Open Google Drive Picker</button>
   <div id="status">Initializing...</div>
@@ -180,7 +180,8 @@
 
       try {
         const picker = new google.picker.PickerBuilder()
-          .addView(google.picker.ViewId.PDFS)  // Show only PDFs
+          .addView(google.picker.ViewId.PDFS)  // Show PDFs
+          .addView(google.picker.ViewId.DOCS)  // Show documents including text files
           .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
           .setOAuthToken(oauthToken)
           .setDeveloperKey(apiKey)
@@ -226,21 +227,23 @@
 
       for (const file of selectedFiles) {
         const isPdf = file.mimeType === 'application/pdf';
+        const isText = file.mimeType === 'text/plain' || file.mimeType.includes('document');
+        const isSupported = isPdf || isText;
 
         const fileItem = document.createElement('div');
         fileItem.className = 'file-item';
 
         const fileIcon = document.createElement('span');
         fileIcon.className = 'file-icon';
-        fileIcon.textContent = '📄';
+        fileIcon.textContent = isPdf ? '📑' : isText ? '📝' : '📄';
 
         const fileName = document.createElement('span');
         fileName.className = 'file-name';
         fileName.textContent = file.name;
 
         const fileType = document.createElement('span');
-        fileType.className = `file-type ${isPdf ? 'pdf' : 'other'}`;
-        fileType.textContent = isPdf ? 'PDF' : 'Not PDF';
+        fileType.className = `file-type ${isSupported ? 'pdf' : 'other'}`;
+        fileType.textContent = isPdf ? 'PDF' : isText ? 'TEXT' : 'UNSUPPORTED';
 
         fileItem.appendChild(fileIcon);
         fileItem.appendChild(fileName);
@@ -296,7 +299,7 @@
 
         // Add a message to instruct the user
         const messageDiv = document.createElement('div');
-        messageDiv.innerHTML = '<p style="color: green; margin-top: 20px;">Please return to the Streamlit app and click "Process Selected Files" to continue.</p>';
+        messageDiv.innerHTML = '<p style="color: green; margin-top: 20px;">Please return to the Streamlit app and click the "Index Selected Files in Pinecone" button to process your files.</p>';
         document.body.appendChild(messageDiv);
 
         // Add a button to close the window

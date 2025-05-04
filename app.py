@@ -414,8 +414,17 @@ if st.session_state.rag_enabled:
     upload_tab, gdrive_tab = st.sidebar.tabs(["Local Upload", "Google Drive"])
 
     with upload_tab:
-        uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+        uploaded_files = st.file_uploader("Upload Files", type=["pdf", "txt", "doc", "docx"], accept_multiple_files=True)
         web_url = st.text_input("Or enter URL")
+
+        # Add instructions for local file upload
+        st.info("""
+        **Instructions:**
+        1. Click "Browse files" to select files from your computer
+        2. You can select multiple files by holding Ctrl (or Cmd on Mac) while clicking
+        3. Supported file types: PDF, TXT, DOC, DOCX
+        4. Files will be automatically processed and indexed
+        """)
 
     with gdrive_tab:
         if not gdrive_client:
@@ -775,7 +784,7 @@ if st.session_state.rag_enabled:
                 st.info("""
                 **Instructions:**
                 1. Click the "Open Google Drive Picker" button to select files from Google Drive
-                2. Select PDF or text files in the popup window
+                2. Select multiple PDF, text, or document files in the popup window
                 3. Click "Confirm Selection" in the popup
                 4. Click the "Index Selected Files in Pinecone" button to process and index your files
                 5. Once indexed, the files will be ready for RAG chat
@@ -891,18 +900,111 @@ if st.session_state.rag_enabled:
     pinecone_initialized = init_pinecone()
 
     # Process documents
-    if uploaded_file:
-        file_name = uploaded_file.name
-        if file_name not in st.session_state.processed_documents:
-            with st.spinner('Processing PDF...'):
-                texts = process_pdf(uploaded_file)
-                if texts and pinecone_initialized:
-                    if st.session_state.vector_store:
-                        st.session_state.vector_store.add_documents(texts)
-                    else:
-                        st.session_state.vector_store = create_vector_store(texts)
-                    st.session_state.processed_documents.append(file_name)
-                    st.success(f"✅ Added PDF: {file_name}")
+    if uploaded_files:
+        processed_count = 0
+        processed_files = []
+
+        for uploaded_file in uploaded_files:
+            file_name = uploaded_file.name
+            file_extension = file_name.split('.')[-1].lower()
+
+            if file_name not in st.session_state.processed_documents:
+                if file_extension == 'pdf':
+                    with st.spinner(f'Processing PDF: {file_name}...'):
+                        texts = process_pdf(uploaded_file)
+                        if texts and pinecone_initialized:
+                            if st.session_state.vector_store:
+                                st.session_state.vector_store.add_documents(texts)
+                            else:
+                                st.session_state.vector_store = create_vector_store(texts)
+                            st.session_state.processed_documents.append(file_name)
+                            processed_files.append(file_name)
+                            processed_count += 1
+                            st.success(f"✅ Added PDF: {file_name}")
+                elif file_extension in ['txt', 'doc', 'docx']:
+                    with st.spinner(f'Processing text file: {file_name}...'):
+                        try:
+                            # Save the file to a temporary location
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}') as tmp_file:
+                                tmp_file.write(uploaded_file.getvalue())
+                                temp_file_path = tmp_file.name
+
+                            # Process based on file type
+                            if file_extension == 'txt':
+                                from langchain_community.document_loaders import TextLoader
+                                loader = TextLoader(temp_file_path)
+                                documents = loader.load()
+                            else:
+                                # For doc/docx, try to use TextLoader as a fallback
+                                try:
+                                    from langchain_community.document_loaders import TextLoader
+                                    loader = TextLoader(temp_file_path)
+                                    documents = loader.load()
+                                except Exception as doc_error:
+                                    st.warning(f"Could not process document as text: {str(doc_error)}")
+                                    continue
+
+                            # Add metadata
+                            for doc in documents:
+                                doc.metadata.update({
+                                    "source_type": "text",
+                                    "file_name": file_name,
+                                    "timestamp": datetime.now().isoformat()
+                                })
+
+                            # Split text
+                            text_splitter = RecursiveCharacterTextSplitter(
+                                chunk_size=1000,
+                                chunk_overlap=200
+                            )
+                            texts = text_splitter.split_documents(documents)
+
+                            # Add to vector store
+                            if texts and pinecone_initialized:
+                                if st.session_state.vector_store:
+                                    st.session_state.vector_store.add_documents(texts)
+                                else:
+                                    st.session_state.vector_store = create_vector_store(texts)
+                                st.session_state.processed_documents.append(file_name)
+                                processed_files.append(file_name)
+                                processed_count += 1
+                                st.success(f"✅ Added file: {file_name}")
+                        except Exception as e:
+                            st.error(f"Error processing file {file_name}: {str(e)}")
+                        finally:
+                            # Clean up temp file
+                            if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
+                                os.unlink(temp_file_path)
+                else:
+                    st.warning(f"Unsupported file type: {file_extension} - {file_name}")
+
+        # Show summary if multiple files were processed
+        if processed_count > 0:
+            # Initialize the Pinecone indexer for retrieval if it doesn't exist
+            if 'pinecone_indexer' not in st.session_state or st.session_state.pinecone_indexer is None:
+                try:
+                    st.session_state.pinecone_indexer = PineconeIndexer(
+                        pinecone_client=st.session_state.pinecone_client,
+                        index_name=st.session_state.pinecone_index_name,
+                        namespace="rag-namespace",
+                        embedding_model="snowflake-arctic-embed"
+                    )
+                except Exception as e:
+                    st.error(f"Error initializing Pinecone indexer: {str(e)}")
+
+            # Show a summary message
+            if processed_count > 1:
+                st.success(f"✅ Successfully processed {processed_count} files")
+                file_list = ", ".join(processed_files)
+                st.info(f"Processed files: {file_list}")
+
+            # Add a visual indicator
+            st.markdown("""
+            <div style="background-color: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin-top: 10px; text-align: center;">
+                <h3 style="margin: 0;">✅ Files Indexed Successfully</h3>
+                <p style="margin: 10px 0 0 0;">Your files have been indexed and are ready for RAG chat.</p>
+            </div>
+            """, unsafe_allow_html=True)
 
     if web_url:
         if web_url not in st.session_state.processed_documents:
